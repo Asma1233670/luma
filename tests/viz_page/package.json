@@ -1,0 +1,7 @@
+{
+  "name": "luma-viz-page-check",
+  "private": true,
+  "type": "module",
+  "description": "Optional: runs the exported graph page in a simulated browser. Needs `npm install` once.",
+  "dependencies": { "jsdom": "^26.0.0" }
+}

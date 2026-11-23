@@ -1,0 +1,14 @@
+
+backend/data/luma.relate/
+.env
+.venv/
+tests/viz_page/node_modules/
+backend/__pycache__/
+tests/__pycache__/
+.vscode/
+.pytest_cache/
+backend/app/__pycache__/
+backend/app/agent/__pycache__/
+backend/app/db/__pycache__/
+backend/app/viz/__pycache__/
+backend/app/agent/tools/__pycache__/
