@@ -3,8 +3,9 @@ from dotenv import load_dotenv
 load_dotenv()
 from zoneinfo import ZoneInfo
 
-from agents import Agent, Model, RunContextWrapper, set_tracing_disabled
-
+from agents import (Agent, Model, OpenAIChatCompletionsModel, RunContextWrapper,
+                    set_tracing_disabled)
+from openai import AsyncOpenAI
 
 from backend.app.agent.context import LumaContext
 from backend.app.agent.tools import graph_tools, memory_tools
@@ -24,7 +25,9 @@ appointments, reminders) look it up with a tool before answering. Never guess or
 something), store it with the right tool, then confirm briefly.
 - For "where are my X", use last_seen. Say how long ago it was, using the sighting time and the \
 current time. If the sighting is old or its confidence is low, say you are not certain.
-- If you remember nothing, say so plainly and offer to remember it from now on.
+- If you remember nothing, say so plainly and offer to remember it from now on. If a lookup instead
+suggests a name, ask "Did you mean Sarah?" and wait for the answer. Do not treat a suggestion as
+confirmed, and do not store anything based on it yet.
 
 SCHEMA
 - You can extend the luma database, but first call list_types and reuse an existing type when \
@@ -48,8 +51,9 @@ def instructions(ctx: RunContextWrapper[LumaContext], agent: Agent[LumaContext])
 
 
 def build_agent(model: str | Model | None = None) -> Agent[LumaContext]:
-    
-    model = model or settings.model or None
+    if model is None:
+        client = AsyncOpenAI(api_key=settings.api_key, base_url=settings.base_url)
+        model = OpenAIChatCompletionsModel(model=settings.model, openai_client=client)
 
     set_tracing_disabled(disabled=True)
     return Agent[LumaContext](

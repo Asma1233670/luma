@@ -1,13 +1,15 @@
 import asyncio
 import json
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 from agents.tool_context import ToolContext
 
-from app.agent.context import LumaContext
-from app.agent.tools import graph_tools, memory_tools
-from app.agent.tools.base import collect_tools
+from backend.app.agent.context import LumaContext
+from backend.app.agent.tools import graph_tools, memory_tools
+from backend.app.agent.tools.base import collect_tools
+from backend.app.config import settings
 
 UTC = timezone.utc
 TOOLS = {t.name: t for t in collect_tools(graph_tools, memory_tools)}
@@ -38,7 +40,7 @@ def err(db, tool, /, **args):
 def clock(monkeypatch):
     """Freeze 'now' so time-based tools are deterministic."""
     now = {"t": datetime(2026, 11, 21, 9, 0, tzinfo=UTC)}
-    monkeypatch.setattr("app.agent.tools.base.utcnow", lambda: now["t"])
+    monkeypatch.setattr("backend.app.agent.tools.base.utcnow", lambda: now["t"])
     return now
 
 
@@ -147,6 +149,31 @@ def test_find_entities_exact_alias_and_text(db):
     assert ok(db, "find_entities", query="o'clock (weird) AND:")["matches"] == []       # no crash on odd input
 
 
+def test_find_entities_suggests_near_miss_without_resolving(db):
+    ok(db, "add_person", name="Sarah", relationship="sister")
+    out = ok(db, "find_entities", query="sara")
+    assert out["matches"] == []                       # a hint, not a silent match
+    assert "Sarah" in out["did_you_mean"]
+    assert "Did you mean" in out["hint"]
+    assert out["candidates"][0]["score"] >= 0.8
+    assert db.read("MATCH (p:Person) RETURN count(p) AS c")[0]["c"] == 2   # 'Me' + Sarah, nothing written
+
+
+def test_last_seen_suggests_near_miss_without_creating(db):
+    ok(db, "create_node", label="Object", name="glasses")
+    out = ok(db, "last_seen", thing="glases")
+    assert out["found"] is False
+    assert out["did_you_mean"] == ["glasses"]
+    assert "Did you mean" in out["hint"]
+    assert db.read("MATCH (o:Object) RETURN count(o) AS c")[0]["c"] == 1
+
+
+def test_fuzzy_suggestion_stays_in_the_requested_label(db):
+    ok(db, "create_node", label="Object", name="Sarah")
+    out = ok(db, "find_entities", query="sara", label="Person")
+    assert out["matches"] == [] and out.get("did_you_mean", []) == []
+
+
 def test_get_node_shows_connections(db):
     sara = ok(db, "add_person", name="Sara", relationship="sister")["person"]
     conns = ok(db, "get_node", id=sara["id"])["connections"]
@@ -235,8 +262,9 @@ def test_reminders_become_due_and_can_be_completed(db, clock):
 def test_time_validation(db, clock):
     assert "Could not read time" in err(db, "set_reminder", text="x", due="tomorrow at 3")
     assert "end is before start" in err(db, "add_appointment", title="x", start="2026-11-24T15:00", end="2026-11-24T14:00")
-    out = ok(db, "set_reminder", text="x", due="2026-11-22T10:00")                 # no offset -> configured zone (UTC default)
-    assert out["reminder"]["due"] == "2026-11-22T10:00:00+00:00"
+    out = ok(db, "set_reminder", text="x", due="2026-11-22T10:00")                 # no offset -> user's zone
+    expected = datetime(2026, 11, 22, 10, 0, tzinfo=ZoneInfo(settings.timezone)).isoformat()
+    assert out["reminder"]["due"] == expected
     about = ok(db, "create_node", label="Object", name="pills")["node"]
     ok(db, "set_reminder", text="refill", due="2026-11-22T10:00", about_id=about["id"])
     assert "No node" in err(db, "set_reminder", text="x", due="2026-11-22T10:00", about_id="ghost")

@@ -4,6 +4,7 @@ These give the agent its freedom. Every label and relationship type must be regi
 (app.db.registry) before use, and the media/perception layers are off limits.
 """
 import re
+from difflib import SequenceMatcher
 from typing import Any, Literal
 
 from agents import RunContextWrapper
@@ -18,6 +19,9 @@ from backend.app.db.guards import (assert_agent_may_use_label, normalize_label, 
 
 RESERVED_ON_CREATE = frozenset({"id", "name", "created_at", "updated_at"})
 RESERVED_ON_UPDATE = frozenset({"id", "created_at", "updated_at"})
+
+FUZZY_THRESHOLD = 0.8            # "sara" vs "sarah" scores 0.89
+FUZZY_CANDIDATE_LIMIT = 500      # bounded scan; this is a hint, not a search engine
 
 
 # ---- helpers (plain functions that take the db; reused by memory_tools) -------------------
@@ -50,12 +54,40 @@ def require_node(db: LumaDB, node_id: str) -> str:
 
 
 def find_by_name(db: LumaDB, label: str | None, name: str) -> dict | None:
-    """Case-insensitive match on name or alias."""
+    """Case-insensitive EXACT match on name or alias (used by write paths)."""
     lab = f":{validate_label(label)}" if label else ""
     rows = db.read(
         f"MATCH (n:Entity{lab}) WHERE toLower(n.name)=$q OR $q IN [x IN coalesce(n.aliases, []) | toLower(x)] "
         "RETURN n LIMIT 1", {"q": name.strip().lower()})
     return rows[0]["n"] if rows else None
+
+
+def folded(value: str) -> str:
+    """Fuzzy comparison form: case and spacing should not decide a near match."""
+    return " ".join(str(value).lower().split())
+
+
+def similar_entities(db: LumaDB, query: str, *, label: str | None = None, limit: int = 3,
+                     threshold: float = FUZZY_THRESHOLD) -> list[dict]:
+    """Names that look like `query`. READ-ONLY hints: never resolves or writes anything.
+
+    Kept deliberately conservative: exact label scope when given, a bounded candidate
+    set, and a score so the agent can say "Did you mean ...?" instead of guessing.
+    """
+    q = folded(query)
+    if len(q) < 3:
+        return []
+    lab = f":{normalize_label(label)}" if label else ""
+    rows = db.read(f"MATCH (n:Entity{lab}) RETURN n.id AS id, n.name AS name, "
+                   "coalesce(n.aliases, []) AS aliases LIMIT $limit",
+                   {"limit": FUZZY_CANDIDATE_LIMIT})
+    scored = []
+    for r in rows:
+        names = [r["name"], *(r["aliases"] or [])]
+        best = max((SequenceMatcher(None, q, folded(n)).ratio() for n in names if n), default=0.0)
+        if best >= threshold:
+            scored.append({"id": r["id"], "name": r["name"], "score": round(best, 2)})
+    return sorted(scored, key=lambda s: -s["score"])[:max(1, min(limit, 5))]
 
 
 def insert_node(db: LumaDB, label: str, base_label: str, name: str, props: dict) -> dict:
@@ -217,6 +249,12 @@ def find_entities(ctx: RunContextWrapper[LumaContext], query: str, label: str | 
                          {"q": " OR ".join(tokens), "limit": limit}):
             if r["node"]["id"] not in seen and len(matches) < limit:
                 matches.append({"match": "text", "node": public(r["node"])})
+    if not matches:
+        suggestions = similar_entities(db, q, label=label)
+        if suggestions:
+            names = ", ".join(repr(s["name"]) for s in suggestions)
+            return {"matches": [], "did_you_mean": [s["name"] for s in suggestions],
+                    "candidates": suggestions, "hint": f"Nothing called {q!r}. Did you mean {names}?"}
     return {"matches": matches}
 
 

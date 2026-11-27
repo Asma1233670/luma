@@ -1,5 +1,4 @@
-"""Luma's everyday memory: people, where things were seen, appointments, reminders..."""
-import re
+"""Luma's everyday memory: people, where things were seen, appointments, reminders."""
 from datetime import timedelta
 
 from agents import RunContextWrapper
@@ -8,7 +7,7 @@ from backend.app.agent.context import LumaContext
 from backend.app.agent.tools import base
 from backend.app.agent.tools.base import ToolError, clean_props, luma_tool, parse_time
 from backend.app.agent.tools.graph_tools import (ensure_entity, find_by_name, insert_node, link_known, public,
-                                         require_node)
+                                         require_node, similar_entities)
 from backend.app.db import registry
 from backend.app.db.client import LumaDB
 from backend.app.db.guards import normalize_label
@@ -79,7 +78,7 @@ def record_sighting(ctx: RunContextWrapper[LumaContext], thing: str, place: str 
         at: ISO 8601 time of the sighting. Omit for now.
         thing_label: Type of the thing. Default 'Object'; use 'Person' for a person.
         with_people: Names of known people who were present.
-        confidence: 0 to 1. Lower it when unsure.
+        confidence: 0 to 1. Lower it when the user is unsure.
     """
     db = ctx.context.db
     label = normalize_label(thing_label)
@@ -110,7 +109,8 @@ def record_sighting(ctx: RunContextWrapper[LumaContext], thing: str, place: str 
 @luma_tool
 def last_seen(ctx: RunContextWrapper[LumaContext], thing: str, limit: int = 3) -> dict:
     """Where was something last seen? Returns the most recent sightings, newest first, with place and
-    context. Matches the exact name or an alias; if nothing matches you get close names back.
+    context. `at` is the last moment it was seen there and `first_seen_here` when it first appeared there.
+    Matches the exact name or an alias; if nothing matches you get close names back.
 
     Args:
         thing: What to look for, e.g. 'glasses'.
@@ -119,15 +119,17 @@ def last_seen(ctx: RunContextWrapper[LumaContext], thing: str, limit: int = 3) -
     db = ctx.context.db
     entity = find_by_name(db, None, thing)
     if entity is None:
-        tokens = re.findall(r"[A-Za-z0-9]+", thing)
-        similar = db.read("CALL db.index.fulltext.queryNodes('entity_text', $q) YIELD node "
-                          "RETURN node.name AS name LIMIT 5", {"q": " OR ".join(tokens) or "_"})
-        return {"found": False, "did_you_mean": [r["name"] for r in similar],
-                "hint": f"Nothing remembered called {thing!r}."}
+        candidates = similar_entities(db, thing)
+        names = [c["name"] for c in candidates]
+        hint = f"Nothing remembered called {thing!r}."
+        if names:
+            hint += " Did you mean " + ", ".join(repr(n) for n in names) + "?"
+        return {"found": False, "did_you_mean": names, "candidates": candidates, "hint": hint}
     rows = db.read(
         "MATCH (s:Sighting)-[:OF]->(e:Entity {id:$id}) OPTIONAL MATCH (s)-[:IN]->(p:Place) "
-        "RETURN s.at AS at, p.name AS place, s.context AS context, s.confidence AS confidence "
-        "ORDER BY s.at DESC LIMIT $limit", {"id": entity["id"], "limit": max(1, min(limit, 10))})
+        "RETURN coalesce(s.last_seen, s.at) AS at, s.at AS first_seen_here, p.name AS place, "
+        "s.context AS context, s.confidence AS confidence ORDER BY at DESC LIMIT $limit",
+        {"id": entity["id"], "limit": max(1, min(limit, 10))})
     return {"found": True, "thing": entity["name"], "sightings": rows,
             **({} if rows else {"hint": f"{entity['name']} is known but has never been seen anywhere."})}
 
